@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 
 @MainActor
 protocol CaptureOverlayViewDelegate: AnyObject {
@@ -25,15 +26,21 @@ final class CaptureOverlayView: NSView {
     private var toolbarButtons: [ToolButton] = []
     private var toolbarFrame: CGRect = .zero
     private var dimensionLabelFrame: CGRect = .zero
+    private var windowCandidates: [CGRect] = []
+    private var allowsWindowSuggestions = true
+    private var isWindowSuggestion = false
+    private var isUsingColorPanel = false
 
     init(snapshot: ScreenSnapshot, initialMode: CaptureMode) {
         self.snapshot = snapshot
         super.init(frame: CGRect(origin: .zero, size: snapshot.screenFrame.size))
+        windowCandidates = WindowSelectionDetector.visibleWindowRects(for: snapshot, in: bounds)
         wantsLayer = true
         layer?.contentsScale = snapshot.scale
         autoresizingMask = [.width, .height]
         if initialMode == .fullScreen {
             selection = bounds
+            allowsWindowSuggestions = false
         }
         rebuildToolbar()
     }
@@ -44,6 +51,8 @@ final class CaptureOverlayView: NSView {
 
     func selectFullScreen() {
         selection = bounds
+        allowsWindowSuggestions = false
+        isWindowSuggestion = false
         needsDisplay = true
     }
 
@@ -51,6 +60,13 @@ final class CaptureOverlayView: NSView {
 
     override func viewDidMoveToWindow() {
         window?.makeFirstResponder(self)
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil {
+            closeColorPanelIfNeeded()
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -69,7 +85,18 @@ final class CaptureOverlayView: NSView {
             return
         }
 
+        updateWindowSuggestion(at: point)
+        if allowsWindowSuggestions, isWindowSuggestion, selection.contains(point) {
+            dragMode = .pendingWindowSelection(selection)
+            dragStart = point
+            selectionBeforeDrag = selection
+            NSCursor.crosshair.set()
+            return
+        }
+
         if let handle = selection.resizeHandle(at: point) {
+            allowsWindowSuggestions = false
+            isWindowSuggestion = false
             activeTool = nil
             dragMode = .resizing(handle)
             dragStart = point
@@ -79,6 +106,8 @@ final class CaptureOverlayView: NSView {
         }
 
         if selection.contains(point), let tool = activeTool {
+            allowsWindowSuggestions = false
+            isWindowSuggestion = false
             dragMode = .annotating(tool)
             NSCursor.crosshair.set()
             beginAnnotation(tool: tool, at: point)
@@ -86,6 +115,8 @@ final class CaptureOverlayView: NSView {
         }
 
         if selection.contains(point) {
+            allowsWindowSuggestions = false
+            isWindowSuggestion = false
             dragMode = .moving
             dragStart = point
             selectionBeforeDrag = selection
@@ -94,6 +125,8 @@ final class CaptureOverlayView: NSView {
         }
 
         activeTool = nil
+        allowsWindowSuggestions = false
+        isWindowSuggestion = false
         dragMode = .selecting
         dragStart = point
         selection = CGRect(origin: point, size: .zero)
@@ -107,6 +140,16 @@ final class CaptureOverlayView: NSView {
         switch dragMode {
         case .none:
             return
+        case .pendingWindowSelection(let windowRect):
+            guard let dragStart else { return }
+            if point.distance(to: dragStart) >= 4 {
+                allowsWindowSuggestions = false
+                isWindowSuggestion = false
+                dragMode = .selecting
+                selection = CGRect.from(dragStart, point).intersection(bounds)
+            } else {
+                selection = windowRect
+            }
         case .selecting:
             guard let dragStart else { return }
             selection = CGRect.from(dragStart, point).intersection(bounds)
@@ -129,6 +172,16 @@ final class CaptureOverlayView: NSView {
             dragMode = .none
             return
         }
+        if case .pendingWindowSelection(let windowRect) = dragMode {
+            selection = windowRect.standardized
+            allowsWindowSuggestions = false
+            isWindowSuggestion = false
+            dragMode = .none
+            dragStart = nil
+            updateCursor(at: point)
+            needsDisplay = true
+            return
+        }
         dragMode = .none
         dragStart = nil
         selection = selection.standardized
@@ -138,6 +191,7 @@ final class CaptureOverlayView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        updateWindowSuggestion(at: point)
         updateCursor(at: point)
     }
 
@@ -226,7 +280,7 @@ final class CaptureOverlayView: NSView {
     }
 
     private func drawToolbar() {
-        guard selection.width > 0, selection.height > 0 else { return }
+        guard selection.width > 0, selection.height > 0, !isWindowSuggestion else { return }
         rebuildToolbar()
         toolbarBackgroundColor.setFill()
         NSBezierPath(roundedRect: toolbarFrame, xRadius: 8, yRadius: 8).fill()
@@ -241,6 +295,9 @@ final class CaptureOverlayView: NSView {
             if let color = button.color {
                 color.setFill()
                 NSBezierPath(ovalIn: button.frame.insetBy(dx: 10, dy: 10)).fill()
+                toolbarColorStroke.setStroke()
+                let swatchFrame = button.frame.insetBy(dx: 10, dy: 10)
+                NSBezierPath(ovalIn: swatchFrame).stroke()
             } else if let image = NSImage(systemSymbolName: button.symbolName, accessibilityDescription: button.title) {
                 let tint = isActive ? NSColor.white : toolbarIconColor
                 image.tinted(with: tint).draw(in: button.frame.insetBy(dx: 11, dy: 11))
@@ -251,9 +308,6 @@ final class CaptureOverlayView: NSView {
     private func isToolbarButtonActive(_ button: ToolButton) -> Bool {
         if let tool = button.tool {
             return tool == activeTool
-        }
-        if let color = button.color {
-            return color.isEqual(activeColor)
         }
         return false
     }
@@ -266,6 +320,10 @@ final class CaptureOverlayView: NSView {
 
     private var toolbarIconColor: NSColor {
         isDarkAppearance ? .white.withAlphaComponent(0.92) : .black.withAlphaComponent(0.86)
+    }
+
+    private var toolbarColorStroke: NSColor {
+        isDarkAppearance ? .white.withAlphaComponent(0.85) : .black.withAlphaComponent(0.55)
     }
 
     private func drawAnnotations() {
@@ -295,6 +353,7 @@ final class CaptureOverlayView: NSView {
     }
 
     private func handleToolbarClick(at point: CGPoint) -> Bool {
+        guard !isWindowSuggestion else { return false }
         guard toolbarFrame.contains(point) else { return false }
         guard let button = toolbarButtons.first(where: { $0.frame.contains(point) }) else { return true }
 
@@ -311,15 +370,15 @@ final class CaptureOverlayView: NSView {
             delegate?.captureOverlayDidRequestTranslate(self)
         case .tool(let tool):
             activeTool = tool
-        case .color(let color):
-            activeColor = color
+        case .pickColor:
+            showColorPanel()
         }
         needsDisplay = true
         return true
     }
 
     private func updateCursor(at point: CGPoint) {
-        if toolbarFrame.contains(point) {
+        if !isWindowSuggestion, toolbarFrame.contains(point) {
             NSCursor.arrow.set()
         } else if let handle = selection.resizeHandle(at: point) {
             handle.cursor.set()
@@ -331,6 +390,49 @@ final class CaptureOverlayView: NSView {
             }
         } else {
             NSCursor.crosshair.set()
+        }
+    }
+
+    private func showColorPanel() {
+        let panel = NSColorPanel.shared
+        isUsingColorPanel = true
+        panel.color = activeColor
+        panel.isContinuous = true
+        panel.setTarget(self)
+        panel.setAction(#selector(colorPanelChanged(_:)))
+        panel.level = .screenSaver
+        panel.orderFrontRegardless()
+    }
+
+    @objc private func colorPanelChanged(_ sender: NSColorPanel) {
+        activeColor = sender.color
+        needsDisplay = true
+    }
+
+    private func closeColorPanelIfNeeded() {
+        guard isUsingColorPanel else { return }
+        let panel = NSColorPanel.shared
+        panel.setTarget(nil)
+        panel.setAction(nil)
+        panel.close()
+        isUsingColorPanel = false
+    }
+
+    private func updateWindowSuggestion(at point: CGPoint) {
+        guard allowsWindowSuggestions, activeTool == nil, !toolbarFrame.contains(point) else { return }
+        guard let windowRect = windowCandidates.first(where: { $0.contains(point) }) else {
+            if isWindowSuggestion {
+                selection = .zero
+                isWindowSuggestion = false
+                needsDisplay = true
+            }
+            return
+        }
+
+        if selection != windowRect || !isWindowSuggestion {
+            selection = windowRect
+            isWindowSuggestion = true
+            needsDisplay = true
         }
     }
 
@@ -384,7 +486,7 @@ final class CaptureOverlayView: NSView {
 
         let buttonSize: CGFloat = 40
         let spacing: CGFloat = 4
-        let buttons: [(String, String, ToolbarAction, AnnotationTool?, NSColor?)] = [
+        var buttons: [(String, String, ToolbarAction, AnnotationTool?, NSColor?)] = [
             ("xmark", "取消", .cancel, nil, nil),
             ("doc.on.doc", "复制", .copy, nil, nil),
             ("square.and.arrow.down", "保存", .save, nil, nil),
@@ -393,10 +495,12 @@ final class CaptureOverlayView: NSView {
             (AnnotationTool.arrow.symbolName, "箭头", .tool(.arrow), .arrow, nil),
             (AnnotationTool.rectangle.symbolName, "矩形", .tool(.rectangle), .rectangle, nil),
             (AnnotationTool.pen.symbolName, "画笔", .tool(.pen), .pen, nil),
-            ("circle.fill", "粉色", .color(.systemPink), nil, .systemPink),
-            ("circle.fill", "黄色", .color(.systemYellow), nil, .systemYellow),
             ("checkmark", "完成并复制", .copy, nil, nil)
         ]
+
+        if activeTool != nil {
+            buttons.insert(("circle.fill", "选择颜色", .pickColor, nil, activeColor), at: buttons.count - 1)
+        }
 
         let width = CGFloat(buttons.count) * buttonSize + CGFloat(buttons.count - 1) * spacing + 16
         let x = min(max(selection.midX - width / 2, bounds.minX + 12), bounds.maxX - width - 12)
@@ -466,6 +570,7 @@ final class CaptureOverlayView: NSView {
 
 private enum DragMode {
     case none
+    case pendingWindowSelection(CGRect)
     case selecting
     case moving
     case resizing(ResizeHandle)
@@ -566,7 +671,73 @@ private enum ToolbarAction {
     case ocr
     case translate
     case tool(AnnotationTool)
-    case color(NSColor)
+    case pickColor
+}
+
+private enum WindowSelectionDetector {
+    static func visibleWindowRects(for snapshot: ScreenSnapshot, in viewBounds: CGRect) -> [CGRect] {
+        guard
+            let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+        else {
+            return []
+        }
+
+        let currentPID = NSRunningApplication.current.processIdentifier
+        let displayBounds = normalizedDisplayBounds(for: snapshot)
+
+        return windowList.compactMap { info -> CGRect? in
+            let layer = info[kCGWindowLayer as String] as? Int ?? Int.max
+            guard layer == 0 else { return nil }
+
+            if let ownerPID = info[kCGWindowOwnerPID as String] as? NSNumber, ownerPID.int32Value == currentPID {
+                return nil
+            }
+
+            let alpha = info[kCGWindowAlpha as String] as? CGFloat ?? 1
+            guard alpha > 0.01 else { return nil }
+
+            guard
+                let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
+                let rawWindowBounds = CGRect(dictionaryRepresentation: boundsDictionary)
+            else {
+                return nil
+            }
+
+            let windowBounds = normalizedWindowBounds(rawWindowBounds, snapshot: snapshot)
+            let localRect = CGRect(
+                x: windowBounds.minX - displayBounds.minX,
+                y: snapshot.screenFrame.height - (windowBounds.maxY - displayBounds.minY),
+                width: windowBounds.width,
+                height: windowBounds.height
+            ).standardized.intersection(viewBounds).integral
+
+            guard localRect.width >= 40, localRect.height >= 40 else {
+                return nil
+            }
+            return localRect
+        }
+    }
+
+    private static func normalizedDisplayBounds(for snapshot: ScreenSnapshot) -> CGRect {
+        let rawBounds = CGDisplayBounds(CGMainDisplayID())
+        let scale = coordinateScale(rawDisplayBounds: rawBounds, snapshot: snapshot)
+        guard scale > 0 else { return rawBounds }
+        return rawBounds.scaled(by: 1 / scale)
+    }
+
+    private static func normalizedWindowBounds(_ rawBounds: CGRect, snapshot: ScreenSnapshot) -> CGRect {
+        let rawDisplayBounds = CGDisplayBounds(CGMainDisplayID())
+        let scale = coordinateScale(rawDisplayBounds: rawDisplayBounds, snapshot: snapshot)
+        guard scale > 0 else { return rawBounds }
+        return rawBounds.scaled(by: 1 / scale)
+    }
+
+    private static func coordinateScale(rawDisplayBounds: CGRect, snapshot: ScreenSnapshot) -> CGFloat {
+        let widthScale = rawDisplayBounds.width / max(snapshot.screenFrame.width, 1)
+        let heightScale = rawDisplayBounds.height / max(snapshot.screenFrame.height, 1)
+        let scale = max(widthScale, heightScale)
+        return scale > 1.1 ? scale : 1
+    }
 }
 
 private extension NSImage {
@@ -580,6 +751,17 @@ private extension NSImage {
         output.unlockFocus()
         output.isTemplate = false
         return output
+    }
+}
+
+private extension CGRect {
+    func scaled(by scale: CGFloat) -> CGRect {
+        CGRect(
+            x: origin.x * scale,
+            y: origin.y * scale,
+            width: size.width * scale,
+            height: size.height * scale
+        )
     }
 }
 
@@ -690,4 +872,10 @@ private extension CGRect {
 
 private func - (lhs: CGPoint, rhs: CGPoint) -> CGSize {
     CGSize(width: lhs.x - rhs.x, height: lhs.y - rhs.y)
+}
+
+private extension CGPoint {
+    func distance(to point: CGPoint) -> CGFloat {
+        hypot(x - point.x, y - point.y)
+    }
 }
