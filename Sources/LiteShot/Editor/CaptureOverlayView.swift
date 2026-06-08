@@ -22,18 +22,28 @@ final class CaptureOverlayView: NSView {
     private var annotations: [AnnotationShape] = []
     private var activeTool: AnnotationTool?
     private var activeColor: NSColor = .systemPink
+    private var activeHue: CGFloat = 0
+    private var activeSaturation: CGFloat = 0.85
+    private var activeBrightness: CGFloat = 1
+    private var activeAlpha: CGFloat = 1
     private var activePenPoints: [CGPoint] = []
     private var toolbarButtons: [ToolButton] = []
     private var toolbarFrame: CGRect = .zero
+    private var hoveredToolbarButton: ToolButton?
+    private var isColorPickerVisible = false
+    private var colorPickerFrame: CGRect = .zero
+    private var colorHueSliderFrame: CGRect = .zero
+    private var colorBrightnessSliderFrame: CGRect = .zero
+    private var colorSwatchFrames: [(color: NSColor, frame: CGRect)] = []
     private var dimensionLabelFrame: CGRect = .zero
     private var windowCandidates: [CGRect] = []
     private var allowsWindowSuggestions = true
     private var isWindowSuggestion = false
-    private var isUsingColorPanel = false
 
     init(snapshot: ScreenSnapshot, initialMode: CaptureMode) {
         self.snapshot = snapshot
         super.init(frame: CGRect(origin: .zero, size: snapshot.screenFrame.size))
+        syncColorControls(from: activeColor)
         windowCandidates = WindowSelectionDetector.visibleWindowRects(for: snapshot, in: bounds)
         wantsLayer = true
         layer?.contentsScale = snapshot.scale
@@ -64,9 +74,6 @@ final class CaptureOverlayView: NSView {
 
     override func viewWillMove(toWindow newWindow: NSWindow?) {
         super.viewWillMove(toWindow: newWindow)
-        if newWindow == nil {
-            closeColorPanelIfNeeded()
-        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -81,9 +88,13 @@ final class CaptureOverlayView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        if handleColorPickerMouseDown(at: point) {
+            return
+        }
         if handleToolbarClick(at: point) {
             return
         }
+        updateHoveredToolbarButton(at: nil)
 
         updateWindowSuggestion(at: point)
         if allowsWindowSuggestions, isWindowSuggestion, selection.contains(point) {
@@ -98,6 +109,7 @@ final class CaptureOverlayView: NSView {
             allowsWindowSuggestions = false
             isWindowSuggestion = false
             activeTool = nil
+            isColorPickerVisible = false
             dragMode = .resizing(handle)
             dragStart = point
             selectionBeforeDrag = selection
@@ -125,6 +137,7 @@ final class CaptureOverlayView: NSView {
         }
 
         activeTool = nil
+        isColorPickerVisible = false
         allowsWindowSuggestions = false
         isWindowSuggestion = false
         dragMode = .selecting
@@ -136,6 +149,7 @@ final class CaptureOverlayView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        updateHoveredToolbarButton(at: nil)
 
         switch dragMode {
         case .none:
@@ -160,12 +174,26 @@ final class CaptureOverlayView: NSView {
             selection = selectionBeforeDrag.resized(using: handle, to: point, inside: bounds)
         case .annotating(let tool):
             updateAnnotation(tool: tool, at: point)
+        case .pickingHue:
+            updateActiveColorFromHueSlider(at: point)
+        case .pickingBrightness:
+            updateActiveColorFromBrightnessSlider(at: point)
         }
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+        if case .pickingHue = dragMode {
+            dragMode = .none
+            updateCursor(at: point)
+            return
+        }
+        if case .pickingBrightness = dragMode {
+            dragMode = .none
+            updateCursor(at: point)
+            return
+        }
         if case .annotating(let tool) = dragMode {
             finishAnnotation(tool: tool, at: point)
             updateCursor(at: point)
@@ -192,6 +220,7 @@ final class CaptureOverlayView: NSView {
     override func mouseMoved(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         updateWindowSuggestion(at: point)
+        updateHoveredToolbarButton(at: point)
         updateCursor(at: point)
     }
 
@@ -303,6 +332,11 @@ final class CaptureOverlayView: NSView {
                 image.tinted(with: tint).draw(in: button.frame.insetBy(dx: 11, dy: 11))
             }
         }
+        if isColorPickerVisible, activeTool != nil {
+            drawColorPicker()
+        } else {
+            drawToolbarTooltip()
+        }
     }
 
     private func isToolbarButtonActive(_ button: ToolButton) -> Bool {
@@ -324,6 +358,118 @@ final class CaptureOverlayView: NSView {
 
     private var toolbarColorStroke: NSColor {
         isDarkAppearance ? .white.withAlphaComponent(0.85) : .black.withAlphaComponent(0.55)
+    }
+
+    private var tooltipBackgroundColor: NSColor {
+        isDarkAppearance
+            ? NSColor(calibratedWhite: 0.10, alpha: 0.92)
+            : NSColor.white.withAlphaComponent(0.96)
+    }
+
+    private var tooltipTextColor: NSColor {
+        isDarkAppearance ? .white.withAlphaComponent(0.95) : .black.withAlphaComponent(0.88)
+    }
+
+    private var colorPickerBackgroundColor: NSColor {
+        isDarkAppearance
+            ? NSColor(calibratedWhite: 0.08, alpha: 0.94)
+            : NSColor.white.withAlphaComponent(0.97)
+    }
+
+    private func drawToolbarTooltip() {
+        guard let button = hoveredToolbarButton else { return }
+
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: tooltipTextColor
+        ]
+        let textSize = button.title.size(withAttributes: attributes)
+        let tooltipSize = CGSize(width: textSize.width + 18, height: 28)
+        let x = min(max(button.frame.midX - tooltipSize.width / 2, bounds.minX + 8), bounds.maxX - tooltipSize.width - 8)
+        let y: CGFloat
+        if toolbarFrame.maxY + tooltipSize.height + 8 <= bounds.maxY {
+            y = toolbarFrame.maxY + 6
+        } else {
+            y = toolbarFrame.minY - tooltipSize.height - 6
+        }
+        let tooltipFrame = CGRect(origin: CGPoint(x: x, y: y), size: tooltipSize)
+
+        tooltipBackgroundColor.setFill()
+        NSBezierPath(roundedRect: tooltipFrame, xRadius: 6, yRadius: 6).fill()
+        toolbarColorStroke.setStroke()
+        let border = NSBezierPath(roundedRect: tooltipFrame, xRadius: 6, yRadius: 6)
+        border.lineWidth = 1
+        border.stroke()
+        button.title.draw(
+            at: CGPoint(x: tooltipFrame.minX + 9, y: tooltipFrame.minY + 7),
+            withAttributes: attributes
+        )
+    }
+
+    private func drawColorPicker() {
+        updateColorPickerLayout()
+
+        colorPickerBackgroundColor.setFill()
+        NSBezierPath(roundedRect: colorPickerFrame, xRadius: 8, yRadius: 8).fill()
+        toolbarColorStroke.setStroke()
+        let border = NSBezierPath(roundedRect: colorPickerFrame, xRadius: 8, yRadius: 8)
+        border.lineWidth = 1
+        border.stroke()
+
+        for item in colorSwatchFrames {
+            item.color.setFill()
+            NSBezierPath(ovalIn: item.frame).fill()
+            (isSameColor(item.color, activeColor) ? NSColor.systemBlue : toolbarColorStroke).setStroke()
+            let swatchBorder = NSBezierPath(ovalIn: item.frame.insetBy(dx: -2, dy: -2))
+            swatchBorder.lineWidth = isSameColor(item.color, activeColor) ? 2 : 1
+            swatchBorder.stroke()
+        }
+
+        drawHueSlider()
+        drawBrightnessSlider()
+    }
+
+    private func drawHueSlider() {
+        let colors: [NSColor] = [
+            .systemRed,
+            .systemYellow,
+            .systemGreen,
+            .systemCyan,
+            .systemBlue,
+            .systemPurple,
+            .systemRed
+        ]
+        if let gradient = NSGradient(colors: colors) {
+            gradient.draw(in: colorHueSliderFrame, angle: 0)
+        }
+        drawSliderBorder(colorHueSliderFrame)
+        drawSliderIndicator(at: colorHueSliderFrame.minX + activeHue * colorHueSliderFrame.width, in: colorHueSliderFrame)
+    }
+
+    private func drawBrightnessSlider() {
+        let brightColor = NSColor(calibratedHue: activeHue, saturation: activeSaturation, brightness: 1, alpha: 1)
+        if let gradient = NSGradient(colors: [.black, brightColor]) {
+            gradient.draw(in: colorBrightnessSliderFrame, angle: 0)
+        }
+        drawSliderBorder(colorBrightnessSliderFrame)
+        drawSliderIndicator(at: colorBrightnessSliderFrame.minX + activeBrightness * colorBrightnessSliderFrame.width, in: colorBrightnessSliderFrame)
+    }
+
+    private func drawSliderBorder(_ frame: CGRect) {
+        toolbarColorStroke.setStroke()
+        let border = NSBezierPath(roundedRect: frame, xRadius: 4, yRadius: 4)
+        border.lineWidth = 1
+        border.stroke()
+    }
+
+    private func drawSliderIndicator(at x: CGFloat, in frame: CGRect) {
+        let indicatorFrame = CGRect(x: x - 2, y: frame.minY - 3, width: 4, height: frame.height + 6)
+        NSColor.white.setFill()
+        NSBezierPath(roundedRect: indicatorFrame, xRadius: 2, yRadius: 2).fill()
+        NSColor.black.withAlphaComponent(0.72).setStroke()
+        let border = NSBezierPath(roundedRect: indicatorFrame, xRadius: 2, yRadius: 2)
+        border.lineWidth = 1
+        border.stroke()
     }
 
     private func drawAnnotations() {
@@ -370,15 +516,65 @@ final class CaptureOverlayView: NSView {
             delegate?.captureOverlayDidRequestTranslate(self)
         case .tool(let tool):
             activeTool = tool
+            isColorPickerVisible = true
         case .pickColor:
-            showColorPanel()
+            isColorPickerVisible.toggle()
         }
         needsDisplay = true
         return true
     }
 
+    private func handleColorPickerMouseDown(at point: CGPoint) -> Bool {
+        guard isColorPickerVisible, activeTool != nil else { return false }
+        updateColorPickerLayout()
+
+        if let swatch = colorSwatchFrames.first(where: { $0.frame.contains(point) }) {
+            syncColorControls(from: swatch.color)
+            needsDisplay = true
+            return true
+        }
+
+        if colorHueSliderFrame.contains(point) {
+            updateActiveColorFromHueSlider(at: point)
+            dragMode = .pickingHue
+            return true
+        }
+
+        if colorBrightnessSliderFrame.contains(point) {
+            updateActiveColorFromBrightnessSlider(at: point)
+            dragMode = .pickingBrightness
+            return true
+        }
+
+        if colorPickerFrame.contains(point) {
+            return true
+        }
+
+        isColorPickerVisible = false
+        needsDisplay = true
+        return false
+    }
+
+    private func updateHoveredToolbarButton(at point: CGPoint?) {
+        let nextButton: ToolButton?
+        if let point, !isWindowSuggestion, toolbarFrame.contains(point) {
+            rebuildToolbar()
+            nextButton = toolbarButtons.first { $0.frame.contains(point) }
+        } else {
+            nextButton = nil
+        }
+
+        guard hoveredToolbarButton?.title != nextButton?.title else { return }
+        hoveredToolbarButton = nextButton
+        needsDisplay = true
+    }
+
     private func updateCursor(at point: CGPoint) {
-        if !isWindowSuggestion, toolbarFrame.contains(point) {
+        if isColorPickerVisible, colorPickerFrame.contains(point) {
+            NSCursor.arrow.set()
+        } else if isWindowSuggestion {
+            NSCursor.arrow.set()
+        } else if !isWindowSuggestion, toolbarFrame.contains(point) {
             NSCursor.arrow.set()
         } else if let handle = selection.resizeHandle(at: point) {
             handle.cursor.set()
@@ -393,29 +589,121 @@ final class CaptureOverlayView: NSView {
         }
     }
 
-    private func showColorPanel() {
-        let panel = NSColorPanel.shared
-        isUsingColorPanel = true
-        panel.color = activeColor
-        panel.isContinuous = true
-        panel.setTarget(self)
-        panel.setAction(#selector(colorPanelChanged(_:)))
-        panel.level = .screenSaver
-        panel.orderFrontRegardless()
+    private func updateColorPickerLayout() {
+        rebuildToolbar()
+        let anchor = toolbarButtons.first { $0.action.isColorPicker }
+        let anchorFrame = anchor?.frame ?? toolbarFrame
+        let pickerSize = CGSize(width: 240, height: 104)
+        let x = min(max(anchorFrame.midX - pickerSize.width / 2, bounds.minX + 8), bounds.maxX - pickerSize.width - 8)
+        let y: CGFloat
+        if toolbarFrame.maxY + pickerSize.height + 8 <= bounds.maxY {
+            y = toolbarFrame.maxY + 6
+        } else {
+            y = toolbarFrame.minY - pickerSize.height - 6
+        }
+        colorPickerFrame = CGRect(origin: CGPoint(x: x, y: y), size: pickerSize)
+
+        let padding: CGFloat = 12
+        let swatchSize: CGFloat = 22
+        let swatchSpacing: CGFloat = 5
+        let swatchY = colorPickerFrame.maxY - padding - swatchSize
+        colorSwatchFrames = presetAnnotationColors.enumerated().map { index, color in
+            let x = colorPickerFrame.minX + padding + CGFloat(index) * (swatchSize + swatchSpacing)
+            return (color, CGRect(x: x, y: swatchY, width: swatchSize, height: swatchSize))
+        }
+
+        colorHueSliderFrame = CGRect(
+            x: colorPickerFrame.minX + padding,
+            y: colorPickerFrame.minY + 39,
+            width: colorPickerFrame.width - padding * 2,
+            height: 12
+        )
+        colorBrightnessSliderFrame = CGRect(
+            x: colorPickerFrame.minX + padding,
+            y: colorPickerFrame.minY + 16,
+            width: colorPickerFrame.width - padding * 2,
+            height: 12
+        )
     }
 
-    @objc private func colorPanelChanged(_ sender: NSColorPanel) {
-        activeColor = sender.color
+    private var presetAnnotationColors: [NSColor] {
+        [
+            .systemRed,
+            .systemOrange,
+            .systemYellow,
+            .systemGreen,
+            .systemBlue,
+            .systemPurple,
+            .white,
+            .black
+        ]
+    }
+
+    private func syncColorControls(from color: NSColor) {
+        let hsba = hsbaComponents(for: color)
+        activeColor = color
+        activeHue = hsba.hue
+        activeSaturation = hsba.saturation
+        activeBrightness = hsba.brightness
+        activeAlpha = hsba.alpha
+    }
+
+    private func hsbaComponents(for sourceColor: NSColor) -> (hue: CGFloat, saturation: CGFloat, brightness: CGFloat, alpha: CGFloat) {
+        let color = sourceColor.usingColorSpace(.deviceRGB) ?? sourceColor
+        var hue: CGFloat = 0
+        var saturation: CGFloat = 0
+        var brightness: CGFloat = 0
+        var alpha: CGFloat = 1
+        color.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: &alpha)
+        return (hue, saturation, brightness, alpha)
+    }
+
+    private func updateActiveColorFromHueSlider(at point: CGPoint) {
+        activeHue = normalizedSliderValue(point.x, in: colorHueSliderFrame)
+        if activeSaturation < 0.05 {
+            activeSaturation = 0.85
+        }
+        updateActiveColorFromControls()
         needsDisplay = true
     }
 
-    private func closeColorPanelIfNeeded() {
-        guard isUsingColorPanel else { return }
-        let panel = NSColorPanel.shared
-        panel.setTarget(nil)
-        panel.setAction(nil)
-        panel.close()
-        isUsingColorPanel = false
+    private func updateActiveColorFromBrightnessSlider(at point: CGPoint) {
+        activeBrightness = normalizedSliderValue(point.x, in: colorBrightnessSliderFrame)
+        updateActiveColorFromControls()
+        needsDisplay = true
+    }
+
+    private func updateActiveColorFromControls() {
+        activeColor = NSColor(
+            calibratedHue: activeHue,
+            saturation: activeSaturation,
+            brightness: activeBrightness,
+            alpha: activeAlpha
+        )
+    }
+
+    private func normalizedSliderValue(_ x: CGFloat, in frame: CGRect) -> CGFloat {
+        guard frame.width > 0 else { return 0 }
+        return min(max((x - frame.minX) / frame.width, 0), 1)
+    }
+
+    private func isSameColor(_ lhs: NSColor, _ rhs: NSColor) -> Bool {
+        let left = lhs.usingColorSpace(.deviceRGB) ?? lhs
+        let right = rhs.usingColorSpace(.deviceRGB) ?? rhs
+        var leftRed: CGFloat = 0
+        var leftGreen: CGFloat = 0
+        var leftBlue: CGFloat = 0
+        var leftAlpha: CGFloat = 0
+        var rightRed: CGFloat = 0
+        var rightGreen: CGFloat = 0
+        var rightBlue: CGFloat = 0
+        var rightAlpha: CGFloat = 0
+        left.getRed(&leftRed, green: &leftGreen, blue: &leftBlue, alpha: &leftAlpha)
+        right.getRed(&rightRed, green: &rightGreen, blue: &rightBlue, alpha: &rightAlpha)
+        return abs(leftRed - rightRed) < 0.01
+            && abs(leftGreen - rightGreen) < 0.01
+            && abs(leftBlue - rightBlue) < 0.01
+            && abs(leftAlpha - rightAlpha) < 0.01
     }
 
     private func updateWindowSuggestion(at point: CGPoint) {
@@ -488,18 +776,17 @@ final class CaptureOverlayView: NSView {
         let spacing: CGFloat = 4
         var buttons: [(String, String, ToolbarAction, AnnotationTool?, NSColor?)] = [
             ("xmark", "取消", .cancel, nil, nil),
-            ("doc.on.doc", "复制", .copy, nil, nil),
             ("square.and.arrow.down", "保存", .save, nil, nil),
             ("text.viewfinder", "OCR", .ocr, nil, nil),
             ("character.book.closed", "翻译", .translate, nil, nil),
             (AnnotationTool.arrow.symbolName, "箭头", .tool(.arrow), .arrow, nil),
             (AnnotationTool.rectangle.symbolName, "矩形", .tool(.rectangle), .rectangle, nil),
             (AnnotationTool.pen.symbolName, "画笔", .tool(.pen), .pen, nil),
-            ("checkmark", "完成并复制", .copy, nil, nil)
+            ("checkmark", "完成", .copy, nil, nil)
         ]
 
         if activeTool != nil {
-            buttons.insert(("circle.fill", "选择颜色", .pickColor, nil, activeColor), at: buttons.count - 1)
+            buttons.insert(("circle.fill", "颜色", .pickColor, nil, activeColor), at: buttons.count - 1)
         }
 
         let width = CGFloat(buttons.count) * buttonSize + CGFloat(buttons.count - 1) * spacing + 16
@@ -575,6 +862,8 @@ private enum DragMode {
     case moving
     case resizing(ResizeHandle)
     case annotating(AnnotationTool)
+    case pickingHue
+    case pickingBrightness
 }
 
 private enum ResizeHandle: CaseIterable {
@@ -672,6 +961,13 @@ private enum ToolbarAction {
     case translate
     case tool(AnnotationTool)
     case pickColor
+
+    var isColorPicker: Bool {
+        if case .pickColor = self {
+            return true
+        }
+        return false
+    }
 }
 
 private enum WindowSelectionDetector {
