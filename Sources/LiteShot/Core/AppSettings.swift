@@ -1,30 +1,33 @@
 import Foundation
 
 @MainActor
-final class AppSettings: ObservableObject {
+final class AppSettings {
     static let shared = AppSettings()
 
-    @Published var copyToClipboard: Bool {
+    var hotKeysDidChange: (() -> Void)?
+    private var didLoadOpenAIAPIKey = false
+
+    var copyToClipboard: Bool {
         didSet { defaults.set(copyToClipboard, forKey: Keys.copyToClipboard) }
     }
 
-    @Published var playSound: Bool {
+    var playSound: Bool {
         didSet { defaults.set(playSound, forKey: Keys.playSound) }
     }
 
-    @Published var showDimensions: Bool {
+    var showDimensions: Bool {
         didSet { defaults.set(showDimensions, forKey: Keys.showDimensions) }
     }
 
-    @Published var imageFormat: ImageFormat {
+    var imageFormat: ImageFormat {
         didSet { defaults.set(imageFormat.rawValue, forKey: Keys.imageFormat) }
     }
 
-    @Published var saveDirectory: String {
+    var saveDirectory: String {
         didSet { defaults.set(saveDirectory, forKey: Keys.saveDirectory) }
     }
 
-    @Published var openAIAPIKey: String {
+    var openAIAPIKey: String {
         didSet {
             if openAIAPIKey.isEmpty {
                 KeychainStore.remove(service: Keys.keychainService, account: Keys.openAIAPIKey)
@@ -34,28 +37,34 @@ final class AppSettings: ObservableObject {
         }
     }
 
-    @Published var openAIModel: String {
+    var openAIModel: String {
         didSet { defaults.set(openAIModel, forKey: Keys.openAIModel) }
     }
 
-    @Published var translationTargetLanguage: String {
+    var translationTargetLanguage: String {
         didSet { defaults.set(translationTargetLanguage, forKey: Keys.translationTargetLanguage) }
     }
 
-    @Published var openAIBaseURL: String {
+    var openAIBaseURL: String {
         didSet { defaults.set(openAIBaseURL, forKey: Keys.openAIBaseURL) }
     }
 
-    @Published var openAIThinkingLength: AIThinkingLength {
+    var openAIThinkingLength: AIThinkingLength {
         didSet { defaults.set(openAIThinkingLength.rawValue, forKey: Keys.openAIThinkingLength) }
     }
 
-    @Published var captureAreaHotKey: HotKey {
-        didSet { store(captureAreaHotKey, forKey: Keys.captureAreaHotKey) }
+    var captureAreaHotKey: HotKey {
+        didSet {
+            store(captureAreaHotKey, forKey: Keys.captureAreaHotKey)
+            hotKeysDidChange?()
+        }
     }
 
-    @Published var captureFullScreenHotKey: HotKey {
-        didSet { store(captureFullScreenHotKey, forKey: Keys.captureFullScreenHotKey) }
+    var captureFullScreenHotKey: HotKey {
+        didSet {
+            store(captureFullScreenHotKey, forKey: Keys.captureFullScreenHotKey)
+            hotKeysDidChange?()
+        }
     }
 
     private let defaults: UserDefaults
@@ -67,20 +76,26 @@ final class AppSettings: ObservableObject {
         showDimensions = defaults.object(forKey: Keys.showDimensions) as? Bool ?? true
         imageFormat = ImageFormat(rawValue: defaults.string(forKey: Keys.imageFormat) ?? "") ?? .png
         saveDirectory = defaults.string(forKey: Keys.saveDirectory) ?? FileLocations.defaultSaveDirectory.path
-        openAIAPIKey = KeychainStore.string(service: Keys.keychainService, account: Keys.openAIAPIKey)
-            ?? defaults.string(forKey: Keys.openAIAPIKey)
-            ?? ""
+        openAIAPIKey = defaults.string(forKey: Keys.openAIAPIKey) ?? ""
         openAIModel = defaults.string(forKey: Keys.openAIModel) ?? "gpt-5.5"
         translationTargetLanguage = defaults.string(forKey: Keys.translationTargetLanguage) ?? "简体中文"
         openAIBaseURL = defaults.string(forKey: Keys.openAIBaseURL) ?? "https://api.openai.com/v1/chat/completions"
         openAIThinkingLength = AIThinkingLength(rawValue: defaults.string(forKey: Keys.openAIThinkingLength) ?? "") ?? .off
         captureAreaHotKey = Self.loadHotKey(from: defaults, key: Keys.captureAreaHotKey) ?? .defaultCaptureArea
         captureFullScreenHotKey = Self.loadHotKey(from: defaults, key: Keys.captureFullScreenHotKey) ?? .defaultCaptureFullScreen
+    }
+
+    func loadOpenAIAPIKeyIfNeeded() {
+        guard !didLoadOpenAIAPIKey else { return }
+        didLoadOpenAIAPIKey = true
 
         if !openAIAPIKey.isEmpty {
             KeychainStore.set(openAIAPIKey, service: Keys.keychainService, account: Keys.openAIAPIKey)
             defaults.removeObject(forKey: Keys.openAIAPIKey)
+            return
         }
+
+        openAIAPIKey = KeychainStore.string(service: Keys.keychainService, account: Keys.openAIAPIKey) ?? ""
     }
 
     private func store(_ hotKey: HotKey, forKey key: String) {
@@ -112,7 +127,7 @@ extension AppSettings {
     }
 }
 
-enum AIThinkingLength: String, CaseIterable, Identifiable, Sendable {
+enum AIThinkingLength: String, CaseIterable, Identifiable, Sendable, Codable {
     case off
     case providerShort = "short"
     case providerMedium = "medium"

@@ -1,23 +1,42 @@
 import AppKit
-import Combine
-import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settings = AppSettings.shared
-    private let historyStore = CaptureHistoryStore()
-    private let captureService = ScreenCaptureService()
-    private let ocrService = OCRService()
-    private let translationService = OpenAITranslationService(settings: .shared)
+    private let memorySmokeMode: Bool
+    private let memorySmokeCopiesImage: Bool
+    private let memorySmokeToolbarCompletion: Bool
+    private let memorySmokeAnnotationPreview: Bool
+    private let memorySmokeEmptyPanelMode: Bool
+    private let memorySmokeColoredPanel: Bool
+    private lazy var historyStore = CaptureHistoryStore()
+    private lazy var captureService = ScreenCaptureService()
+    private lazy var ocrService = OCRService()
+    private lazy var translationService = OpenAITranslationService(settings: settings)
     private var statusController: StatusItemController?
     private var captureCoordinator: CaptureCoordinator?
     private var preferencesWindow: NSWindow?
     private var historyWindow: NSWindow?
-    private var cancellables: Set<AnyCancellable> = []
+    private var didInstallMainMenu = false
+
+    init(
+        memorySmokeMode: Bool = false,
+        memorySmokeCopiesImage: Bool = false,
+        memorySmokeToolbarCompletion: Bool = false,
+        memorySmokeAnnotationPreview: Bool = false,
+        memorySmokeEmptyPanelMode: Bool = false,
+        memorySmokeColoredPanel: Bool = false
+    ) {
+        self.memorySmokeMode = memorySmokeMode
+        self.memorySmokeCopiesImage = memorySmokeCopiesImage
+        self.memorySmokeToolbarCompletion = memorySmokeToolbarCompletion
+        self.memorySmokeAnnotationPreview = memorySmokeAnnotationPreview
+        self.memorySmokeEmptyPanelMode = memorySmokeEmptyPanelMode
+        self.memorySmokeColoredPanel = memorySmokeColoredPanel
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        installMainMenu()
-
         statusController = StatusItemController(
             onCaptureArea: { [weak self] in self?.startCapture(mode: .area) },
             onCaptureFullScreen: { [weak self] in self?.startCapture(mode: .fullScreen) },
@@ -29,16 +48,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         configureHotKeys()
 
-        settings.$captureAreaHotKey
-            .combineLatest(settings.$captureFullScreenHotKey)
-            .dropFirst()
-            .sink { [weak self] _, _ in
-                self?.configureHotKeys()
-            }
-            .store(in: &cancellables)
+        settings.hotKeysDidChange = { [weak self] in
+            self?.configureHotKeys()
+        }
+
+        if memorySmokeEmptyPanelMode {
+            runMemorySmokeEmptyPanel()
+        } else if memorySmokeMode {
+            runMemorySmokeCapture()
+        }
     }
 
-    private func installMainMenu() {
+    private func installMainMenuIfNeeded() {
+        guard !didInstallMainMenu else { return }
+        didInstallMainMenu = true
+
         let mainMenu = NSMenu()
 
         let appItem = NSMenuItem()
@@ -108,20 +132,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self?.captureCoordinator = nil
                 }
             } catch {
+                if memorySmokeMode {
+                    print("memory-smoke error=start-capture-failed message=\(error.localizedDescription)")
+                    fflush(stdout)
+                }
                 AlertPresenter.show(error.localizedDescription)
             }
         }
     }
 
     private func showPreferences() {
+        installMainMenuIfNeeded()
+
         if let preferencesWindow {
             preferencesWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
 
-        let view = PreferencesView(settings: settings)
-        let controller = NSHostingController(rootView: view)
+        let controller = PreferencesViewController(settings: settings)
         let window = NSWindow(contentViewController: controller)
         window.title = "偏好设置"
         window.styleMask = [.titled, .closable, .miniaturizable]
@@ -135,14 +164,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func showHistory() {
+        installMainMenuIfNeeded()
+
         if let historyWindow {
             historyWindow.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
 
-        let view = HistoryView(store: historyStore)
-        let controller = NSHostingController(rootView: view)
+        let controller = HistoryViewController(store: historyStore)
         let window = NSWindow(contentViewController: controller)
         window.title = "历史记录"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -153,6 +183,127 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         historyWindow = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func runMemorySmokeCapture() {
+        Task { @MainActor in
+            logMemorySmoke("baseline")
+            try? await Task.sleep(for: .milliseconds(300))
+
+            startCapture(mode: .fullScreen)
+            try? await Task.sleep(for: .milliseconds(800))
+            logMemorySmoke("overlay-visible")
+
+            guard let coordinator = captureCoordinator else {
+                print("memory-smoke error=no-capture-coordinator")
+                NSApp.terminate(nil)
+                return
+            }
+
+            if memorySmokeToolbarCompletion {
+                guard coordinator.triggerToolbarCompletionForMemorySmoke() else {
+                    print("memory-smoke error=toolbar-complete-failed")
+                    coordinator.finishMemorySmoke()
+                    NSApp.terminate(nil)
+                    return
+                }
+                PasteboardWriter.copy(text: "LiteShot memory smoke")
+                MemoryPressureRelief.releaseNow()
+                try? await Task.sleep(for: .milliseconds(800))
+                logMemorySmoke("after-toolbar-complete")
+                printVisibleWindowsForMemorySmoke()
+                NSApp.terminate(nil)
+                return
+            }
+
+            if memorySmokeAnnotationPreview {
+                guard coordinator.showAnnotationPreviewForMemorySmoke() else {
+                    print("memory-smoke error=annotation-preview-failed")
+                    coordinator.finishMemorySmoke()
+                    NSApp.terminate(nil)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(800))
+                logMemorySmoke("annotation-preview-visible")
+                printVisibleWindowsForMemorySmoke()
+                coordinator.finishMemorySmoke()
+                MemoryPressureRelief.releaseNow()
+                try? await Task.sleep(for: .milliseconds(800))
+                logMemorySmoke("after-annotation-preview-close")
+                printVisibleWindowsForMemorySmoke()
+                NSApp.terminate(nil)
+                return
+            }
+
+            var image = coordinator.renderSelectionForMemorySmoke()
+            guard image != nil else {
+                print("memory-smoke error=render-selection-failed")
+                coordinator.finishMemorySmoke()
+                NSApp.terminate(nil)
+                return
+            }
+            logMemorySmoke("selection-image-held")
+
+            if memorySmokeCopiesImage, let copiedImage = image {
+                PasteboardWriter.copy(copiedImage)
+                logMemorySmoke("image-copied")
+                PasteboardWriter.copy(text: "LiteShot memory smoke")
+                logMemorySmoke("pasteboard-cleared-to-text")
+            }
+
+            logMemorySmoke("panel-closed-image-held")
+
+            image = nil
+            MemoryPressureRelief.releaseNow()
+            try? await Task.sleep(for: .milliseconds(800))
+            logMemorySmoke("after-image-release")
+            printVisibleWindowsForMemorySmoke()
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func runMemorySmokeEmptyPanel() {
+        Task { @MainActor in
+            logMemorySmoke("baseline")
+            guard let screen = NSScreen.main else {
+                print("memory-smoke error=no-screen")
+                NSApp.terminate(nil)
+                return
+            }
+            let panel = CapturePanel(screenFrame: screen.frame)
+            panel.backgroundColor = memorySmokeColoredPanel ? NSColor.black.withAlphaComponent(0.42) : .clear
+            panel.contentView = NSView(frame: CGRect(origin: .zero, size: screen.frame.size))
+            panel.contentView?.wantsLayer = false
+            panel.orderFrontRegardless()
+            panel.makeKey()
+            try? await Task.sleep(for: .milliseconds(800))
+            logMemorySmoke("empty-panel-visible")
+            panel.contentView = nil
+            panel.orderOut(nil)
+            panel.close()
+            MemoryPressureRelief.releaseNow()
+            try? await Task.sleep(for: .milliseconds(800))
+            logMemorySmoke("after-panel-close")
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func logMemorySmoke(_ phase: String) {
+        if let footprint = MemoryPressureRelief.currentFootprintMegabytes() {
+            print(String(format: "memory-smoke phase=%@ footprint_mb=%.1f", phase, footprint))
+        } else {
+            print("memory-smoke phase=\(phase) footprint_mb=unknown")
+        }
+        fflush(stdout)
+    }
+
+    private func printVisibleWindowsForMemorySmoke() {
+        let visibleWindows = NSApp.windows.filter { $0.isVisible }
+        print("memory-smoke visible_windows=\(visibleWindows.count)")
+        for window in visibleWindows {
+            print("memory-smoke window class=\(type(of: window)) level=\(window.level.rawValue) frame=\(NSStringFromRect(window.frame)) title=\(window.title)")
+        }
+        fflush(stdout)
     }
 }
 

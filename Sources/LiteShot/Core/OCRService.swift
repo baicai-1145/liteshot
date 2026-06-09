@@ -1,15 +1,24 @@
 import AppKit
-@preconcurrency import Vision
+import Foundation
 
 enum OCRServiceError: LocalizedError {
     case imageConversionFailed
+    case helperNotFound
+    case helperFailed(String)
 
     var errorDescription: String? {
-        "无法读取图片内容用于 OCR。"
+        switch self {
+        case .imageConversionFailed:
+            "无法读取图片内容用于 OCR。"
+        case .helperNotFound:
+            "未找到 OCR helper。请重新打包或重新安装 LiteShot。"
+        case .helperFailed(let message):
+            message.isEmpty ? "OCR 识别失败。" : "OCR 识别失败：\(message)"
+        }
     }
 }
 
-struct OCRTextLine: Identifiable, Sendable, Equatable {
+struct OCRTextLine: Identifiable, Sendable, Equatable, Codable {
     let id: Int
     let text: String
     let boundingBox: CGRect
@@ -23,58 +32,144 @@ final class OCRService {
             .joined(separator: "\n")
     }
 
+    func recognizeText(in image: CapturedImage) async throws -> String {
+        try await recognizeTextLines(in: image)
+            .map(\.text)
+            .joined(separator: "\n")
+    }
+
     func recognizeTextLines(in image: NSImage) async throws -> [OCRTextLine] {
-        guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+        let imageURL = try writeTemporaryImage(image)
+        defer { try? FileManager.default.removeItem(at: imageURL) }
+        let data = try await runOCRHelper(imageURL: imageURL)
+        return try JSONDecoder().decode([OCRTextLine].self, from: data)
+    }
+
+    func recognizeTextLines(in image: CapturedImage) async throws -> [OCRTextLine] {
+        let imageURL = try writeTemporaryImage(image)
+        defer { try? FileManager.default.removeItem(at: imageURL) }
+        let data = try await runOCRHelper(imageURL: imageURL)
+        return try JSONDecoder().decode([OCRTextLine].self, from: data)
+    }
+
+    private func writeTemporaryImage(_ image: NSImage) throws -> URL {
+        guard let pngData = autoreleasepool(invoking: { ImageExporter.encodedData(for: image, format: .png) }) else {
             throw OCRServiceError.imageConversionFailed
         }
+        return try writeTemporaryPNGData(pngData)
+    }
 
-        return try await performTextLineRecognition(in: cgImage)
+    private func writeTemporaryImage(_ image: CapturedImage) throws -> URL {
+        guard let pngData = autoreleasepool(invoking: { ImageExporter.encodedData(for: image, format: .png) }) else {
+            throw OCRServiceError.imageConversionFailed
+        }
+        return try writeTemporaryPNGData(pngData)
+    }
+
+    private func writeTemporaryPNGData(_ pngData: Data) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LiteShot-OCR-\(UUID().uuidString)")
+            .appendingPathExtension("png")
+        try pngData.write(to: url, options: [.atomic])
+        return url
+    }
+
+    private func runOCRHelper(imageURL: URL) async throws -> Data {
+        guard let helperURL = Self.helperURL() else {
+            throw OCRServiceError.helperNotFound
+        }
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let resolver = ContinuationResolver<Data>(continuation: continuation)
+            let process = Process()
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
+            let outputBuffer = LockedDataBuffer()
+            let errorBuffer = LockedDataBuffer()
+            process.executableURL = helperURL
+            process.arguments = [imageURL.path]
+            process.standardOutput = outputPipe
+            process.standardError = errorPipe
+            outputPipe.fileHandleForReading.readabilityHandler = { handle in
+                outputBuffer.append(handle.availableData)
+            }
+            errorPipe.fileHandleForReading.readabilityHandler = { handle in
+                errorBuffer.append(handle.availableData)
+            }
+            process.terminationHandler = { process in
+                outputPipe.fileHandleForReading.readabilityHandler = nil
+                errorPipe.fileHandleForReading.readabilityHandler = nil
+                outputBuffer.append(outputPipe.fileHandleForReading.availableData)
+                errorBuffer.append(errorPipe.fileHandleForReading.availableData)
+                if process.terminationStatus == 0 {
+                    resolver.resume(returning: outputBuffer.data())
+                } else {
+                    let message = String(data: errorBuffer.data(), encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    resolver.resume(throwing: OCRServiceError.helperFailed(message))
+                }
+            }
+
+            do {
+                try process.run()
+            } catch {
+                outputPipe.fileHandleForReading.readabilityHandler = nil
+                errorPipe.fileHandleForReading.readabilityHandler = nil
+                resolver.resume(throwing: error)
+            }
+        }
+    }
+
+    private static func helperURL() -> URL? {
+        if let appBundleURL = Bundle.main.bundleURL as URL?, appBundleURL.pathExtension == "app" {
+            let helperURL = appBundleURL
+                .appendingPathComponent("Contents")
+                .appendingPathComponent("Helpers")
+                .appendingPathComponent("LiteShotOCRHelper")
+            if FileManager.default.isExecutableFile(atPath: helperURL.path) {
+                return helperURL
+            }
+        }
+
+        if let executableURL = Bundle.main.executableURL {
+            let siblingURL = executableURL
+                .deletingLastPathComponent()
+                .appendingPathComponent("LiteShotOCRHelper")
+            if FileManager.default.isExecutableFile(atPath: siblingURL.path) {
+                return siblingURL
+            }
+        }
+
+        let workingDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        for configuration in ["release", "debug"] {
+            let helperURL = workingDirectory
+                .appendingPathComponent(".build")
+                .appendingPathComponent(configuration)
+                .appendingPathComponent("LiteShotOCRHelper")
+            if FileManager.default.isExecutableFile(atPath: helperURL.path) {
+                return helperURL
+            }
+        }
+
+        return nil
     }
 }
 
-private func performTextLineRecognition(in cgImage: CGImage) async throws -> [OCRTextLine] {
-    try await withCheckedThrowingContinuation { continuation in
-        let resolver = ContinuationResolver<[OCRTextLine]>(continuation: continuation)
-        let request = VNRecognizeTextRequest { request, error in
-            if let error {
-                resolver.resume(throwing: error)
-                return
-            }
+private final class LockedDataBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = Data()
 
-            let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
-            let lines = observations
-                .sorted { first, second in
-                    if abs(first.boundingBox.midY - second.boundingBox.midY) > 0.015 {
-                        return first.boundingBox.midY > second.boundingBox.midY
-                    }
-                    return first.boundingBox.minX < second.boundingBox.minX
-                }
-                .enumerated()
-                .compactMap { index, observation -> OCRTextLine? in
-                    guard let candidate = observation.topCandidates(1).first else { return nil }
-                    let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !text.isEmpty else { return nil }
-                    return OCRTextLine(id: index, text: text, boundingBox: observation.boundingBox)
-                }
-            resolver.resume(returning: lines)
-        }
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
-        let preferredLanguages = ["zh-Hans", "zh-Hant", "en-US", "ja-JP", "ko-KR"]
-        if let supportedLanguages = try? request.supportedRecognitionLanguages() {
-            request.recognitionLanguages = preferredLanguages.filter { supportedLanguages.contains($0) }
-        } else {
-            request.recognitionLanguages = preferredLanguages
-        }
+    func append(_ data: Data) {
+        guard !data.isEmpty else { return }
+        lock.lock()
+        storage.append(data)
+        lock.unlock()
+    }
 
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                try handler.perform([request])
-            } catch {
-                resolver.resume(throwing: error)
-            }
-        }
+    func data() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
     }
 }
 

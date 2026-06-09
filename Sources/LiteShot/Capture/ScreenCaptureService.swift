@@ -7,9 +7,9 @@ enum CaptureMode {
 }
 
 struct ScreenSnapshot {
-    let image: NSImage
     let screenFrame: CGRect
     let scale: CGFloat
+    let displayID: CGDirectDisplayID
 }
 
 enum ScreenCaptureError: LocalizedError {
@@ -38,11 +38,16 @@ final class ScreenCaptureService {
         }
 
         let displayID = CGMainDisplayID()
-        guard let cgImage = CGDisplayCreateImage(displayID) else {
-            throw ScreenCaptureError.captureFailed
-        }
+        let displayBounds = CGDisplayBounds(displayID)
+        let displayScale = max(
+            displayBounds.width / max(screen.frame.width, 1),
+            displayBounds.height / max(screen.frame.height, 1)
+        )
 
-        let image = NSImage(cgImage: cgImage, size: screen.frame.size)
-        return ScreenSnapshot(image: image, screenFrame: screen.frame, scale: screen.backingScaleFactor)
+        return ScreenSnapshot(
+            screenFrame: screen.frame,
+            scale: displayScale,
+            displayID: displayID
+        )
     }
 }

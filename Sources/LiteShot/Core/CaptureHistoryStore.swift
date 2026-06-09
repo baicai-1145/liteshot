@@ -2,8 +2,9 @@ import AppKit
 import Foundation
 
 @MainActor
-final class CaptureHistoryStore: ObservableObject {
-    @Published private(set) var items: [CaptureHistoryItem] = []
+final class CaptureHistoryStore {
+    private(set) var items: [CaptureHistoryItem] = []
+    var onChange: (() -> Void)?
     private let maximumItems = 50
 
     init() {
@@ -24,6 +25,7 @@ final class CaptureHistoryStore: ObservableObject {
         items.insert(item, at: 0)
         items = Array(items.prefix(maximumItems))
         save()
+        onChange?()
         return item.id
     }
 
@@ -36,11 +38,13 @@ final class CaptureHistoryStore: ObservableObject {
             items[index].translation = translation
         }
         save()
+        onChange?()
     }
 
     func clear() {
         items.removeAll()
         save()
+        onChange?()
     }
 
     private func load() {

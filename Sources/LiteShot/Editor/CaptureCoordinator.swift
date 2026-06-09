@@ -48,29 +48,73 @@ final class CaptureCoordinator {
 
     private func finish() {
         if let panel {
+            (panel.contentView as? CaptureOverlayView)?.closeVisualOverlay()
+            CaptureOverlayView.closeAllVisualOverlays()
+            panel.contentView = nil
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0
                 context.allowsImplicitAnimation = false
                 panel.orderOut(nil)
             }
+            panel.close()
         }
         panel = nil
+        let completion = completion
+        self.completion = nil
         completion?()
+        DispatchQueue.main.async {
+            CaptureOverlayView.closeAllVisualOverlays()
+        }
+        MemoryPressureRelief.releaseAfterCurrentEvent()
     }
 
-    private func renderCurrentSelection(from view: CaptureOverlayView) -> NSImage? {
-        guard let image = view.renderSelection() else {
+    private func renderCurrentSelection(from view: CaptureOverlayView) -> CapturedImage? {
+        guard view.canRenderSelection() else {
             AlertPresenter.show("请选择截图区域。")
+            return nil
+        }
+
+        finish()
+        releasePanelBackingBeforeRendering()
+        guard let image = view.renderSelection(overlayIsAlreadyClosed: true) else {
+            AlertPresenter.show("截图失败。")
             return nil
         }
         return image
     }
 
-    private func saveCurrentSelection(from view: CaptureOverlayView) -> SavedCapture? {
-        guard let image = renderCurrentSelection(from: view) else { return nil }
+    func renderSelectionForMemorySmoke() -> CapturedImage? {
+        guard let view = panel?.contentView as? CaptureOverlayView else { return nil }
+        guard view.canRenderSelection() else { return nil }
+        finish()
+        releasePanelBackingBeforeRendering()
+        return view.renderSelection(overlayIsAlreadyClosed: true)
+    }
+
+    func finishMemorySmoke() {
+        finish()
+    }
+
+    func triggerToolbarCompletionForMemorySmoke() -> Bool {
+        guard let view = panel?.contentView as? CaptureOverlayView else { return false }
+        return view.triggerToolbarCompletionForMemorySmoke()
+    }
+
+    func showAnnotationPreviewForMemorySmoke() -> Bool {
+        guard let view = panel?.contentView as? CaptureOverlayView else { return false }
+        return view.showAnnotationPreviewForMemorySmoke()
+    }
+
+    private func releasePanelBackingBeforeRendering() {
+        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        MemoryPressureRelief.releaseNow()
+    }
+
+    private func saveCurrentSelection(from view: CaptureOverlayView) {
+        guard let image = renderCurrentSelection(from: view) else { return }
 
         if settings.copyToClipboard {
-            PasteboardWriter.copy(image: image)
+            PasteboardWriter.copy(image)
         }
 
         do {
@@ -79,12 +123,11 @@ final class CaptureCoordinator {
             if settings.playSound {
                 NSSound(named: "Glass")?.play()
             }
-            let historyID = historyStore.add(imageURL: url, pixelSize: image.pixelSize)
-            return SavedCapture(image: image, url: url, historyID: historyID)
+            historyStore.add(imageURL: url, pixelSize: image.pixelSize)
         } catch {
             AlertPresenter.show(error.localizedDescription)
-            return nil
         }
+        MemoryPressureRelief.releaseAfterCurrentEvent()
     }
 }
 
@@ -95,36 +138,36 @@ extension CaptureCoordinator: CaptureOverlayViewDelegate {
 
     func captureOverlayDidRequestCopy(_ view: CaptureOverlayView) {
         guard let image = renderCurrentSelection(from: view) else { return }
-        PasteboardWriter.copy(image: image)
+        PasteboardWriter.copy(image)
         NSSound(named: "Pop")?.play()
-        finish()
+        MemoryPressureRelief.releaseAfterCurrentEvent()
     }
 
     func captureOverlayDidRequestSave(_ view: CaptureOverlayView) {
-        _ = saveCurrentSelection(from: view)
-        finish()
+        saveCurrentSelection(from: view)
     }
 
     func captureOverlayDidRequestOCR(_ view: CaptureOverlayView) {
         guard let image = renderCurrentSelection(from: view) else { return }
-        Task { @MainActor in
+        let ocrService = ocrService
+        Task { @MainActor [image, ocrService] in
             do {
                 let text = try await ocrService.recognizeText(in: image)
                 PasteboardWriter.copy(text: text)
-                OCRResultWindowController.show(image: image, text: text)
+                OCRResultWindowController.show(image: image.nsImage, text: text)
             } catch {
                 AlertPresenter.show(error.localizedDescription)
             }
         }
-        finish()
     }
 
     func captureOverlayDidRequestTranslate(_ view: CaptureOverlayView) {
         guard let image = renderCurrentSelection(from: view) else { return }
-        let resultWindow = OCRResultWindowController.showLoading(image: image, title: "翻译结果", status: "正在识别文字...")
-        finish()
+        let resultWindow = OCRResultWindowController.showLoading(image: image.nsImage, title: "翻译结果", status: "正在识别文字...")
+        let ocrService = ocrService
+        let translationService = translationService
 
-        Task { @MainActor in
+        Task { @MainActor [image, ocrService, resultWindow, translationService] in
             do {
                 let lines = try await ocrService.recognizeTextLines(in: image)
                 guard !lines.isEmpty else {
@@ -139,18 +182,12 @@ extension CaptureCoordinator: CaptureOverlayViewDelegate {
                 resultWindow.updateStatus("正在嵌入翻译结果...")
                 let translatedImage = EmbeddedTranslationRenderer.render(image: image, lines: translatedLines)
                 PasteboardWriter.copy(text: translatedText)
-                resultWindow.update(image: translatedImage, text: translatedText, title: "翻译结果")
+                resultWindow.update(image: translatedImage.nsImage, text: translatedText, title: "翻译结果")
             } catch {
                 resultWindow.updateStatus("翻译失败：\(error.localizedDescription)")
             }
         }
     }
-}
-
-private struct SavedCapture {
-    let image: NSImage
-    let url: URL?
-    let historyID: UUID?
 }
 
 private extension NSImage {

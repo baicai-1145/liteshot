@@ -6,15 +6,20 @@ BUILD_DIR="$ROOT_DIR/.build/release"
 APP_DIR="$ROOT_DIR/build/LiteShot.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
+HELPERS_DIR="$CONTENTS_DIR/Helpers"
 APP_VERSION="${LITESHOT_VERSION:-0.1.0}"
 APP_BUILD="${LITESHOT_BUILD:-1}"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 
 swift build -c release --product LiteShot
+swift build -c release --product LiteShotOCRHelper
+swift build -c release --product LiteShotAIHelper
 
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR"
+mkdir -p "$MACOS_DIR" "$HELPERS_DIR"
 cp "$BUILD_DIR/LiteShot" "$MACOS_DIR/LiteShot"
+cp "$BUILD_DIR/LiteShotOCRHelper" "$HELPERS_DIR/LiteShotOCRHelper"
+cp "$BUILD_DIR/LiteShotAIHelper" "$HELPERS_DIR/LiteShotAIHelper"
 
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

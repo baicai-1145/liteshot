@@ -1,30 +1,63 @@
 import AppKit
 
 enum EmbeddedTranslationRenderer {
+    static func render(image: CapturedImage, lines: [TranslatedTextLine]) -> CapturedImage {
+        let rendered = render(cgImage: image.cgImage, size: image.size, lines: lines)
+        return CapturedImage(cgImage: rendered ?? image.cgImage, size: image.size)
+    }
+
     static func render(image: NSImage, lines: [TranslatedTextLine]) -> NSImage {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             return image
         }
-
-        let canvasSize = image.size
-        let output = NSImage(size: canvasSize)
-        let bitmap = NSBitmapImageRep(cgImage: cgImage)
-
-        output.lockFocus()
-        image.draw(in: CGRect(origin: .zero, size: canvasSize), from: .zero, operation: .sourceOver, fraction: 1)
-
-        for line in lines where !line.translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let baseRect = imageRect(from: line.boundingBox, imageSize: canvasSize)
-            let renderRect = expandedRect(for: baseRect, text: line.translatedText, imageSize: canvasSize)
-            let background = sampledBackgroundColor(bitmap: bitmap, rect: renderRect, imageSize: canvasSize)
-            let foreground = readableTextColor(on: background)
-
-            drawBackground(in: renderRect, color: background)
-            drawText(line.translatedText, in: renderRect.insetBy(dx: 3, dy: 2), color: foreground)
+        guard let rendered = render(cgImage: cgImage, size: image.size, lines: lines) else {
+            return image
         }
+        return NSImage(cgImage: rendered, size: image.size)
+    }
 
-        output.unlockFocus()
-        return output.normalizedBitmapImage()
+    private static func render(cgImage: CGImage, size: CGSize, lines: [TranslatedTextLine]) -> CGImage? {
+        autoreleasepool {
+            let canvasSize = size
+            let width = max(cgImage.width, 1)
+            let height = max(cgImage.height, 1)
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+            guard let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: 0,
+                space: colorSpace,
+                bitmapInfo: bitmapInfo
+            ) else {
+                return nil
+            }
+
+            let scaleX = CGFloat(width) / max(canvasSize.width, 1)
+            let scaleY = CGFloat(height) / max(canvasSize.height, 1)
+            let bitmap = NSBitmapImageRep(cgImage: cgImage)
+
+            context.scaleBy(x: scaleX, y: scaleY)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+            NSImage(cgImage: cgImage, size: canvasSize)
+                .draw(in: CGRect(origin: .zero, size: canvasSize), from: .zero, operation: .sourceOver, fraction: 1)
+
+            for line in lines where !line.translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let baseRect = imageRect(from: line.boundingBox, imageSize: canvasSize)
+                let renderRect = expandedRect(for: baseRect, text: line.translatedText, imageSize: canvasSize)
+                let background = sampledBackgroundColor(bitmap: bitmap, rect: renderRect, imageSize: canvasSize)
+                let foreground = readableTextColor(on: background)
+
+                drawBackground(in: renderRect, color: background)
+                drawText(line.translatedText, in: renderRect.insetBy(dx: 3, dy: 2), color: foreground)
+            }
+
+            NSGraphicsContext.restoreGraphicsState()
+            return context.makeImage()
+        }
     }
 
     private static func imageRect(from normalizedBox: CGRect, imageSize: CGSize) -> CGRect {
@@ -160,14 +193,5 @@ private extension CGRect {
         rect.size.width = min(rect.width, bounds.width)
         rect.size.height = min(rect.height, bounds.height)
         return rect
-    }
-}
-
-private extension NSImage {
-    func normalizedBitmapImage() -> NSImage {
-        guard let cgImage = cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return self
-        }
-        return NSImage(cgImage: cgImage, size: size)
     }
 }

@@ -1,19 +1,4 @@
 import AppKit
-import SwiftUI
-
-struct HotKeyRecorder: NSViewRepresentable {
-    @Binding var hotKey: HotKey
-
-    func makeNSView(context: Context) -> HotKeyRecorderView {
-        HotKeyRecorderView(hotKey: hotKey) { newValue in
-            hotKey = newValue
-        }
-    }
-
-    func updateNSView(_ nsView: HotKeyRecorderView, context: Context) {
-        nsView.hotKey = hotKey
-    }
-}
 
 final class HotKeyRecorderView: NSView {
     var hotKey: HotKey {

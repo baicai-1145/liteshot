@@ -9,11 +9,19 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "LiteShot", targets: ["LiteShot"])
+        .executable(name: "LiteShot", targets: ["LiteShot"]),
+        .executable(name: "LiteShotOCRHelper", targets: ["LiteShotOCRHelper"]),
+        .executable(name: "LiteShotAIHelper", targets: ["LiteShotAIHelper"])
     ],
     targets: [
         .executableTarget(
             name: "LiteShot"
+        ),
+        .executableTarget(
+            name: "LiteShotOCRHelper"
+        ),
+        .executableTarget(
+            name: "LiteShotAIHelper"
         ),
     ]
 )

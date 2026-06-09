@@ -13,6 +13,7 @@ final class CapturePanel: NSPanel {
         isOpaque = false
         hasShadow = false
         animationBehavior = .none
+        isReleasedWhenClosed = false
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         ignoresMouseEvents = false
         acceptsMouseMovedEvents = true
