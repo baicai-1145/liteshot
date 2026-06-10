@@ -38,17 +38,21 @@ enum ImageExporter {
     }
 
     private static func capturedCGImage(from snapshot: ScreenSnapshot, selectionInScreenPoints selection: CGRect) -> CGImage? {
-        let displayBounds = CGDisplayBounds(snapshot.displayID)
-        let scaleX = displayBounds.width / max(snapshot.screenFrame.width, 1)
-        let scaleY = displayBounds.height / max(snapshot.screenFrame.height, 1)
+        let scaleX = CGFloat(snapshot.frozenImage.width) / max(snapshot.screenFrame.width, 1)
+        let scaleY = CGFloat(snapshot.frozenImage.height) / max(snapshot.screenFrame.height, 1)
         let pixelRect = CGRect(
-            x: displayBounds.minX + selection.minX * scaleX,
-            y: displayBounds.minY + (snapshot.screenFrame.height - selection.maxY) * scaleY,
+            x: selection.minX * scaleX,
+            y: (snapshot.screenFrame.height - selection.maxY) * scaleY,
             width: selection.width * scaleX,
             height: selection.height * scaleY
-        ).integral
+        )
+            .integral
+            .intersection(CGRect(x: 0, y: 0, width: snapshot.frozenImage.width, height: snapshot.frozenImage.height))
 
-        return CGDisplayCreateImage(snapshot.displayID, rect: pixelRect)
+        guard pixelRect.width > 0, pixelRect.height > 0 else {
+            return nil
+        }
+        return snapshot.frozenImage.cropping(to: pixelRect)
     }
 
     static func encodedData(for image: CapturedImage, format: ImageFormat) -> Data? {

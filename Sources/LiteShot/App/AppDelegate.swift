@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let memorySmokeCopiesImage: Bool
     private let memorySmokeToolbarCompletion: Bool
     private let memorySmokeAnnotationPreview: Bool
+    private let memorySmokeHoldOverlay: Bool
     private let memorySmokeEmptyPanelMode: Bool
     private let memorySmokeColoredPanel: Bool
     private lazy var historyStore = CaptureHistoryStore()
@@ -24,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         memorySmokeCopiesImage: Bool = false,
         memorySmokeToolbarCompletion: Bool = false,
         memorySmokeAnnotationPreview: Bool = false,
+        memorySmokeHoldOverlay: Bool = false,
         memorySmokeEmptyPanelMode: Bool = false,
         memorySmokeColoredPanel: Bool = false
     ) {
@@ -31,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.memorySmokeCopiesImage = memorySmokeCopiesImage
         self.memorySmokeToolbarCompletion = memorySmokeToolbarCompletion
         self.memorySmokeAnnotationPreview = memorySmokeAnnotationPreview
+        self.memorySmokeHoldOverlay = memorySmokeHoldOverlay
         self.memorySmokeEmptyPanelMode = memorySmokeEmptyPanelMode
         self.memorySmokeColoredPanel = memorySmokeColoredPanel
         super.init()
@@ -118,9 +121,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startCapture(mode: CaptureMode) {
         Task { @MainActor in
             do {
-                let snapshot = try await captureService.captureMainDisplay()
+                let snapshots = try await captureService.captureAllDisplays()
+                if memorySmokeHoldOverlay {
+                    dumpFrozenSnapshotsForMemorySmoke(snapshots)
+                }
                 let coordinator = CaptureCoordinator(
-                    snapshot: snapshot,
+                    snapshots: snapshots,
                     mode: mode,
                     settings: settings,
                     historyStore: historyStore,
@@ -196,6 +202,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             guard let coordinator = captureCoordinator else {
                 print("memory-smoke error=no-capture-coordinator")
+                NSApp.terminate(nil)
+                return
+            }
+
+            if memorySmokeHoldOverlay {
+                printVisibleWindowsForMemorySmoke()
+                try? await Task.sleep(for: .seconds(8))
+                coordinator.finishMemorySmoke()
+                MemoryPressureRelief.releaseNow()
+                try? await Task.sleep(for: .milliseconds(800))
+                logMemorySmoke("after-hold-overlay-close")
+                printVisibleWindowsForMemorySmoke()
                 NSApp.terminate(nil)
                 return
             }
@@ -297,11 +315,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fflush(stdout)
     }
 
+    private func dumpFrozenSnapshotsForMemorySmoke(_ snapshots: [ScreenSnapshot]) {
+        for (index, snapshot) in snapshots.enumerated() {
+            guard let data = ImageExporter.encodedData(for: snapshot.frozenImage, format: .png) else {
+                continue
+            }
+            let url = URL(fileURLWithPath: "/tmp/liteshot-frozen-\(index).png")
+            try? data.write(to: url, options: [.atomic])
+            print("memory-smoke frozen_snapshot index=\(index) path=\(url.path) pixels=\(snapshot.frozenImage.width)x\(snapshot.frozenImage.height)")
+        }
+        fflush(stdout)
+    }
+
     private func printVisibleWindowsForMemorySmoke() {
         let visibleWindows = NSApp.windows.filter { $0.isVisible }
         print("memory-smoke visible_windows=\(visibleWindows.count)")
         for window in visibleWindows {
-            print("memory-smoke window class=\(type(of: window)) level=\(window.level.rawValue) frame=\(NSStringFromRect(window.frame)) title=\(window.title)")
+            print("memory-smoke window id=\(window.windowNumber) class=\(type(of: window)) level=\(window.level.rawValue) frame=\(NSStringFromRect(window.frame)) title=\(window.title)")
         }
         fflush(stdout)
     }

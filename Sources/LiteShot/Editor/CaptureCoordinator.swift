@@ -2,24 +2,24 @@ import AppKit
 
 @MainActor
 final class CaptureCoordinator {
-    private let snapshot: ScreenSnapshot
+    private let snapshots: [ScreenSnapshot]
     private let mode: CaptureMode
     private let settings: AppSettings
     private let historyStore: CaptureHistoryStore
     private let ocrService: OCRService
     private let translationService: OpenAITranslationService
-    private var panel: NSPanel?
+    private var panels: [NSPanel] = []
     private var completion: (() -> Void)?
 
     init(
-        snapshot: ScreenSnapshot,
+        snapshots: [ScreenSnapshot],
         mode: CaptureMode,
         settings: AppSettings,
         historyStore: CaptureHistoryStore,
         ocrService: OCRService,
         translationService: OpenAITranslationService
     ) {
-        self.snapshot = snapshot
+        self.snapshots = snapshots
         self.mode = mode
         self.settings = settings
         self.historyStore = historyStore
@@ -29,27 +29,34 @@ final class CaptureCoordinator {
 
     func start(onFinish: @escaping () -> Void) {
         completion = onFinish
-        let panel = CapturePanel(screenFrame: snapshot.screenFrame)
-        let view = CaptureOverlayView(snapshot: snapshot, initialMode: mode)
-        view.delegate = self
-        panel.contentView = view
-        self.panel = panel
+        var createdPanels: [NSPanel] = []
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
             context.allowsImplicitAnimation = false
-            panel.orderFrontRegardless()
-            panel.makeKey()
-        }
 
-        if mode == .fullScreen {
-            view.selectFullScreen()
+            for snapshot in snapshots {
+                let panel = CapturePanel(screenFrame: snapshot.screenFrame)
+                let view = CaptureOverlayView(snapshot: snapshot, initialMode: mode)
+                view.delegate = self
+                panel.contentView = view
+                panel.orderFrontRegardless()
+                createdPanels.append(panel)
+
+                if mode == .fullScreen {
+                    view.selectFullScreen()
+                }
+            }
         }
+        panels = createdPanels
+
+        let mouseLocation = NSEvent.mouseLocation
+        let keyPanel = panels.first { $0.frame.contains(mouseLocation) } ?? panels.first
+        keyPanel?.makeKey()
     }
 
     private func finish() {
-        if let panel {
+        for panel in panels {
             (panel.contentView as? CaptureOverlayView)?.closeVisualOverlay()
-            CaptureOverlayView.closeAllVisualOverlays()
             panel.contentView = nil
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0
@@ -58,7 +65,8 @@ final class CaptureCoordinator {
             }
             panel.close()
         }
-        panel = nil
+        CaptureOverlayView.closeAllVisualOverlays()
+        panels.removeAll()
         let completion = completion
         self.completion = nil
         completion?()
@@ -84,7 +92,7 @@ final class CaptureCoordinator {
     }
 
     func renderSelectionForMemorySmoke() -> CapturedImage? {
-        guard let view = panel?.contentView as? CaptureOverlayView else { return nil }
+        guard let view = firstOverlayViewForMemorySmoke() else { return nil }
         guard view.canRenderSelection() else { return nil }
         finish()
         releasePanelBackingBeforeRendering()
@@ -96,13 +104,17 @@ final class CaptureCoordinator {
     }
 
     func triggerToolbarCompletionForMemorySmoke() -> Bool {
-        guard let view = panel?.contentView as? CaptureOverlayView else { return false }
+        guard let view = firstOverlayViewForMemorySmoke() else { return false }
         return view.triggerToolbarCompletionForMemorySmoke()
     }
 
     func showAnnotationPreviewForMemorySmoke() -> Bool {
-        guard let view = panel?.contentView as? CaptureOverlayView else { return false }
+        guard let view = firstOverlayViewForMemorySmoke() else { return false }
         return view.showAnnotationPreviewForMemorySmoke()
+    }
+
+    private func firstOverlayViewForMemorySmoke() -> CaptureOverlayView? {
+        panels.compactMap { $0.contentView as? CaptureOverlayView }.first
     }
 
     private func releasePanelBackingBeforeRendering() {

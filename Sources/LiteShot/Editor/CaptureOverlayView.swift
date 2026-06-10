@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import QuartzCore
 
 @MainActor
 protocol CaptureOverlayViewDelegate: AnyObject {
@@ -45,6 +46,13 @@ final class CaptureOverlayView: NSView {
     init(snapshot: ScreenSnapshot, initialMode: CaptureMode) {
         self.snapshot = snapshot
         super.init(frame: CGRect(origin: .zero, size: snapshot.screenFrame.size))
+        let backingLayer = CALayer()
+        backingLayer.frame = bounds
+        backingLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        layer = backingLayer
+        wantsLayer = true
+        layerContentsRedrawPolicy = .never
+        configureFrozenImageLayer()
         visualOverlay.onMouseDown = { [weak self] point in
             self?.handleVisualOverlayMouseDown(at: point)
         }
@@ -87,10 +95,13 @@ final class CaptureOverlayView: NSView {
         CaptureVisualOverlay.closeAllPanels()
     }
 
+    override var isOpaque: Bool { true }
+
     override var acceptsFirstResponder: Bool { true }
 
     override func viewDidMoveToWindow() {
         window?.makeFirstResponder(self)
+        configureFrozenImageLayer()
         if let window {
             visualOverlay.show(screenFrame: snapshot.screenFrame, level: NSWindow.Level(rawValue: window.level.rawValue + 1))
             refreshVisualOverlay()
@@ -107,7 +118,28 @@ final class CaptureOverlayView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
+        guard layer == nil else { return }
+        NSImage(cgImage: snapshot.frozenImage, size: bounds.size).draw(in: bounds)
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        configureFrozenImageLayer()
+    }
+
+    override func layout() {
+        super.layout()
+        layer?.frame = bounds
+    }
+
+    private func configureFrozenImageLayer() {
+        guard let layer else { return }
+        layer.contents = snapshot.frozenImage
+        layer.contentsGravity = .resize
+        layer.contentsScale = snapshot.scale
+        layer.backgroundColor = NSColor.black.cgColor
+        layer.isOpaque = true
+        layer.masksToBounds = true
     }
 
     override func mouseDown(with event: NSEvent) {
