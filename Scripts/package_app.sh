@@ -7,6 +7,7 @@ APP_DIR="$ROOT_DIR/build/LiteShot.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 HELPERS_DIR="$CONTENTS_DIR/Helpers"
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
 APP_VERSION="${LITESHOT_VERSION:-0.1.0}"
 APP_BUILD="${LITESHOT_BUILD:-1}"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
@@ -16,10 +17,11 @@ swift build -c release --product LiteShotOCRHelper
 swift build -c release --product LiteShotAIHelper
 
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR" "$HELPERS_DIR"
+mkdir -p "$MACOS_DIR" "$HELPERS_DIR" "$RESOURCES_DIR"
 cp "$BUILD_DIR/LiteShot" "$MACOS_DIR/LiteShot"
 cp "$BUILD_DIR/LiteShotOCRHelper" "$HELPERS_DIR/LiteShotOCRHelper"
 cp "$BUILD_DIR/LiteShotAIHelper" "$HELPERS_DIR/LiteShotAIHelper"
+cp "$ROOT_DIR/Resources/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -32,6 +34,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
     <string>local.baicai1145.liteshot</string>
     <key>CFBundleName</key>
     <string>LiteShot</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var translationService = OpenAITranslationService(settings: settings)
     private var statusController: StatusItemController?
     private var captureCoordinator: CaptureCoordinator?
+    private var isCaptureSessionActive = false
     private var preferencesWindow: NSWindow?
     private var historyWindow: NSWindow?
     private var didInstallMainMenu = false
@@ -119,6 +120,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startCapture(mode: CaptureMode) {
+        guard !isCaptureSessionActive else { return }
+        isCaptureSessionActive = true
+
         Task { @MainActor in
             do {
                 let snapshots = try await captureService.captureAllDisplays()
@@ -134,10 +138,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     translationService: translationService
                 )
                 captureCoordinator = coordinator
-                coordinator.start { [weak self] in
-                    self?.captureCoordinator = nil
+                coordinator.start { [weak self, weak coordinator] in
+                    guard let self else { return }
+                    if self.captureCoordinator === coordinator {
+                        self.captureCoordinator = nil
+                    }
+                    self.isCaptureSessionActive = false
                 }
             } catch {
+                isCaptureSessionActive = false
                 if memorySmokeMode {
                     print("memory-smoke error=start-capture-failed message=\(error.localizedDescription)")
                     fflush(stdout)
